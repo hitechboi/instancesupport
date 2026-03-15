@@ -476,6 +476,51 @@ function ChildVm:OnCFrameChanged(instance, callback, threshold)
     end)
 end
 
+function ChildVm:OnOffsetValueChanged(instance, offsets, memType, callback, threshold)
+    threshold = threshold or 0.001
+
+    local function readValue()
+        local result = nil
+        pcall(function()
+            local addr = instance.Address
+            if type(offsets) == "table" then
+                for i = 1, #offsets - 1 do
+                    addr = memory_read("uintptr_t", addr + offsets[i])
+                end
+                result = memory_read(memType, addr + offsets[#offsets])
+            else
+                result = memory_read(memType, addr + offsets)
+            end
+        end)
+        return result
+    end
+
+    local current = readValue()
+    local watcher = {
+        active = true,
+        poll = function()
+            if not instance or not instance.Parent then return end
+            local new = readValue()
+            if new == nil or current == nil then current = new return end
+            local changed = false
+            if type(new) == "number" then
+                changed = math.abs(new - current) > threshold
+            else
+                changed = new ~= current
+            end
+            if changed then
+                local old = current
+                current = new
+                pcall(callback, new, old)
+            end
+        end,
+    }
+    table.insert(self._watchers, watcher)
+    return Connection.new(function()
+        watcher.active = false
+    end)
+end
+
 function ChildVm:OnSizeChanged(instance, callback, threshold)
     threshold = threshold or 0.001
     local function readSize()
