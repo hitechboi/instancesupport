@@ -82,6 +82,11 @@ ChildVm.Signal = Signal
 ChildVm.Connection = Connection
 ChildVm._VERSION = "1.0.0"
 
+local _propertyOffsets = {
+    CFrame = { type = "cframe" },
+    Size   = { type = "size" },
+}
+
 function ChildVm.new(config)
     config = config or {}
     local self = setmetatable({
@@ -168,7 +173,6 @@ function ChildVm:OnChildRemoved(parent, callback)
     local watcher = {
         active = true,
         poll = function()
-            if not parent or not parent.Parent then return end
             local now = snapshotChildren(parent)
             for addr, child in pairs(current) do
                 if not now[addr] then
@@ -305,6 +309,32 @@ function ChildVm:OncePropertyChanged(instance, propName, callback)
         callback(new, old)
     end)
     return conn
+end
+
+function ChildVm:GetPropertyChangedSignal(instance, propName, callbackOrType, callbackOrThreshold, threshold)
+    if type(propName) == "table" or type(propName) == "number" then
+        local offsets = propName
+        local memType = callbackOrType
+        local callback = callbackOrThreshold
+        local thresh = threshold
+        return self:OnOffsetValueChanged(instance, offsets, memType, callback, thresh)
+    end
+
+    local known = _propertyOffsets[propName]
+    if known then
+        if known.type == "cframe" then
+            return self:OnCFrameChanged(instance, callbackOrType, callbackOrThreshold)
+        elseif known.type == "size" then
+            return self:OnSizeChanged(instance, callbackOrType, callbackOrThreshold)
+        end
+    end
+
+    local ok = pcall(function() local _ = instance[propName] end)
+    if ok then
+        return self:OnPropertyChanged(instance, propName, callbackOrType)
+    end
+
+    return Connection.new(function() end)
 end
 
 function ChildVm:OnChanged(instance, callback, properties)
@@ -476,9 +506,47 @@ function ChildVm:OnCFrameChanged(instance, callback, threshold)
     end)
 end
 
+function ChildVm:OnSizeChanged(instance, callback, threshold)
+    threshold = threshold or 0.001
+    local function readSize()
+        local result = nil
+        pcall(function()
+            local prim = memory_read("uintptr_t", instance.Address + 0x148)
+            local sizePtr = memory_read("uintptr_t", prim + 0x50)
+            result = {
+                X = memory_read("float", sizePtr + 0x20),
+                Y = memory_read("float", sizePtr + 0x24),
+                Z = memory_read("float", sizePtr + 0x28),
+            }
+        end)
+        return result
+    end
+
+    local current = readSize()
+    local watcher = {
+        active = true,
+        poll = function()
+            if not instance or not instance.Parent then return end
+            local new = readSize()
+            if not new or not current then current = new return end
+            local dx = math.abs(new.X - current.X)
+            local dy = math.abs(new.Y - current.Y)
+            local dz = math.abs(new.Z - current.Z)
+            if dx > threshold or dy > threshold or dz > threshold then
+                local old = current
+                current = new
+                pcall(callback, new, old)
+            end
+        end,
+    }
+    table.insert(self._watchers, watcher)
+    return Connection.new(function()
+        watcher.active = false
+    end)
+end
+
 function ChildVm:OnOffsetValueChanged(instance, offsets, memType, callback, threshold)
     threshold = threshold or 0.001
-
     local function readValue()
         local result = nil
         pcall(function()
@@ -509,45 +577,6 @@ function ChildVm:OnOffsetValueChanged(instance, offsets, memType, callback, thre
                 changed = new ~= current
             end
             if changed then
-                local old = current
-                current = new
-                pcall(callback, new, old)
-            end
-        end,
-    }
-    table.insert(self._watchers, watcher)
-    return Connection.new(function()
-        watcher.active = false
-    end)
-end
-
-function ChildVm:OnSizeChanged(instance, callback, threshold)
-    threshold = threshold or 0.001
-    local function readSize()
-        local result = nil
-        pcall(function()
-            local prim = memory_read("uintptr_t", instance.Address + 0x148)
-            local sizePtr = memory_read("uintptr_t", prim + 0x50)
-            result = {
-                X = memory_read("float", sizePtr + 0x20),
-                Y = memory_read("float", sizePtr + 0x24),
-                Z = memory_read("float", sizePtr + 0x28),
-            }
-        end)
-        return result
-    end
-
-    local current = readSize()
-    local watcher = {
-        active = true,
-        poll = function()
-            if not instance or not instance.Parent then return end
-            local new = readSize()
-            if not new or not current then current = new return end
-            local dx = math.abs(new.X - current.X)
-            local dy = math.abs(new.Y - current.Y)
-            local dz = math.abs(new.Z - current.Z)
-            if dx > threshold or dy > threshold or dz > threshold then
                 local old = current
                 current = new
                 pcall(callback, new, old)
